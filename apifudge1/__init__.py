@@ -1,5 +1,5 @@
 import transformers, torch, accelerate
-import os
+import itertools, os, random
 
 # let's make an interface to collect user examples for apis
     # these are scrapable, but let's not scrape them yet.
@@ -85,13 +85,16 @@ class Generator:
         )
         return self.tokenizer.decode(output_ids)
     def augment(self, api):
-        token_ids = []
+        # would be much more efficient to explore the first generation possibilities, rather than continuing to accumulate
+        examples_ids = []
         for ex_prompt, ex_result in api.get_examples().items():
-            token_ids.extend(self._encode_one(ex_prompt, ex_result))
+            examples_ids.append(self._encode_one(ex_prompt, ex_result))
         while True:
+            random.shuffle(examples_ids)
+            token_ids = list(itertools.chain.from_iterable(examples_ids))
             prompt_ids = self._forward(token_ids + self._encode_one())
             result_ids = self._forward(token_ids + self._encode_one(prompt_ids))
-            token_ids.extend(self._encode_one(prompt_ids, result_ids))
-            if len(token_ids) >= self.model.config.seq_length:
+            if len(token_ids) + len(prompt_ids) + len(result_ids) + 3 >= self.model.config.seq_length:
                 break
             yield self.tokenizer.decode(prompt_ids), self.tokenizer.decode(result_ids)
+            examples_ids.append(self._encode_one(prompt_ids, result_ids))
