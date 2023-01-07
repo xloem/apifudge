@@ -46,8 +46,6 @@ class Generator:
                 )
         self.model = pipeline.model
         self.tokenizer = pipeline.tokenizer
-        # pad token disabled since it may be used in the prompt
-        self.model.config.pad_token_id = -1
         # disallow zero-length generations
         self.model.config.begin_suppress_tokens = [self.tokenizer.eos_token_id]
     @property
@@ -59,22 +57,50 @@ class Generator:
         if ex_prompt is not None:
             if type(ex_prompt) is str:
                 ex_prompt = self.tokenizer.encode(ex_prompt)
+            if ex_prompt[-1] == self.tokenizer.eos_token_id:
+                ex_prompt = ex_prompt[:-1]
+            assert ex_prompt[-1] not in (self.tokenizer.eos_token_id, self.tokenizer.pad_token_id)
             token_ids.extend(ex_prompt)
-            token_ids.append(self.tokenizer.pad_token_id)
+            token_ids.append(self.tokenizer.eos_token_id)
             if ex_result is not None:
                 if type(ex_result) is str:
                     ex_result = self.tokenizer.encode(ex_result)
+                if ex_result[-1] == self.tokenizer.eos_token_id:
+                    ex_result = ex_result[:-1]
+                assert ex_result[-1] not in (self.tokenizer.eos_token_id, self.tokenizer.pad_token_id)
                 token_ids.extend(ex_result)
                 token_ids.append(self.tokenizer.eos_token_id)
         else:
             assert ex_result is None
         return token_ids
-    def _forward(self, token_ids, **kwparams):
-        token_ids = torch.tensor(token_ids, device=self.device)[None,:]
-        output_ids = self.model.generate(token_ids, attention_mask=torch.ones_like(token_ids), max_length=self.model.config.seq_length, **kwparams)
-        output_ids = output_ids[0]
-        output_ids = output_ids[token_ids.shape[-1]:(-1 if output_ids[-1] in (self.tokenizer.eos_token_id, self.tokenizer.pad_token_id) else None)]
-        return output_ids
+    def _forward(self, tokens_ids, **kwparams):
+        if type(tokens_ids[0]) is int:
+            tokens_ids = [tokens_ids]
+        max_len = max([len(token_ids) for token_ids in tokens_ids])
+        attn_mask = torch.tensor([
+                [0] * (max_len - len(token_ids)) + [1] * len(token_ids)
+                for token_ids in tokens_ids
+            ], device=self.device)
+        tokens_ids = torch.tensor([
+                [self.tokenizer.pad_token_id] * (max_len - len(token_ids)) + token_ids
+                for token_ids in tokens_ids
+            ], device=self.device)
+        outputs_ids = self.model.generate(
+                tokens_ids,
+                attention_mask=attn_mask,
+                max_length=kwparams.pop('max_length', self.model.config.seq_length),
+                **kwparams
+            )
+        outputs_ids = outputs_ids[...,tokens_ids.shape[-1]:]
+        assert (outputs_ids >= 0).all()
+        outputs_ids = [
+            (output_ids[:torch.where(output_ids == self.tokenizer.pad_token_id)[0][0]] 
+             if output_ids[-1] == self.tokenizer.pad_token_id else output_ids)
+            for output_ids in outputs_ids
+        ]
+        if len(outputs_ids) == 1:
+            outputs_ids = outputs_ids[0]
+        return outputs_ids
     def __call__(self, api, prompt):
         token_ids = []
         for ex_prompt, ex_result in api.get_examples().items():
@@ -83,18 +109,20 @@ class Generator:
         output_ids = self._forward(
             token_ids,
         )
-        return self.tokenizer.decode(output_ids)
-    def augment(self, api):
-        # would be much more efficient to explore the first generation possibilities, rather than continuing to accumulate
+        return self.tokenizer.decode(output_ids, skip_special_tokens = True)
+    def augment(self, api, count=8):
         examples_ids = []
         for ex_prompt, ex_result in api.get_examples().items():
             examples_ids.append(self._encode_one(ex_prompt, ex_result))
-        while True:
-            random.shuffle(examples_ids)
-            token_ids = list(itertools.chain.from_iterable(examples_ids))
-            prompt_ids = self._forward(token_ids + self._encode_one())
-            result_ids = self._forward(token_ids + self._encode_one(prompt_ids))
-            if len(token_ids) + len(prompt_ids) + len(result_ids) + 3 >= self.model.config.seq_length:
-                break
-            yield self.tokenizer.decode(prompt_ids), self.tokenizer.decode(result_ids)
-            examples_ids.append(self._encode_one(prompt_ids, result_ids))
+        random.shuffle(examples_ids)
+        token_ids = list(itertools.chain.from_iterable(examples_ids))
+        # i looked at hf beam search, and decided not to use it because it required to upload all the hypothesis beams
+        # to the gpu together, which means arbitrarily limiting the width of the tree exploration to a small value
+        # i began implementing a beam search, but was not focused enough to do it correctly
+        # i have a disparate working implementation in adventure3 that could be copied
+        # but the change to huggingface transformers might not be that significant
+        #    prompts_ids = simple_beam_search(self.model, token_ids + self._encode_one(), count, tokenizer=self.tokenizer)
+        # sampling seems to work well enough for now
+        prompts_ids = self._forward(token_ids + self._encode_one(), num_return_sequences=count, do_sample=True)
+        results_ids = self._forward([token_ids + self._encode_one(prompt_ids) for prompt_ids in prompts_ids])
+        return list(zip(self.tokenizer.batch_decode(prompts_ids, skip_special_tokens = True), self.tokenizer.batch_decode(results_ids, skip_special_tokens = True)))
