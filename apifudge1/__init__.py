@@ -48,24 +48,50 @@ class Generator:
         self.tokenizer = pipeline.tokenizer
         # pad token disabled since it may be used in the prompt
         self.model.config.pad_token_id = -1
+        # disallow zero-length generations
+        self.model.config.begin_suppress_tokens = [self.tokenizer.eos_token_id]
     @property
     def device(self):
         return self.model.device
+    def _encode_one(self, ex_prompt = None, ex_result = None):
+        token_ids = []
+        token_ids.append(self.tokenizer.bos_token_id)
+        if ex_prompt is not None:
+            if type(ex_prompt) is str:
+                ex_prompt = self.tokenizer.encode(ex_prompt)
+            token_ids.extend(ex_prompt)
+            token_ids.append(self.tokenizer.pad_token_id)
+            if ex_result is not None:
+                if type(ex_result) is str:
+                    ex_result = self.tokenizer.encode(ex_result)
+                token_ids.extend(ex_result)
+                token_ids.append(self.tokenizer.eos_token_id)
+        else:
+            assert ex_result is None
+        return token_ids
+    def _forward(self, token_ids, **kwparams):
+        token_ids = torch.tensor(token_ids, device=self.device)[None,:]
+        output_ids = self.model.generate(token_ids, attention_mask=torch.ones_like(token_ids), max_length=self.model.config.seq_length, **kwparams)
+        output_ids = output_ids[0]
+        output_ids = output_ids[token_ids.shape[-1]:(-1 if output_ids[-1] in (self.tokenizer.eos_token_id, self.tokenizer.pad_token_id) else None)]
+        return output_ids
     def __call__(self, api, prompt):
         token_ids = []
         for ex_prompt, ex_result in api.get_examples().items():
-            token_ids.append(self.tokenizer.bos_token_id)
-            token_ids.extend(self.tokenizer.encode(ex_prompt))
-            token_ids.append(self.tokenizer.pad_token_id)
-            token_ids.extend(self.tokenizer.encode(ex_result))
-            token_ids.append(self.tokenizer.eos_token_id)
-        token_ids.append(self.tokenizer.bos_token_id)
-        token_ids.extend(self.tokenizer.encode(prompt))
-        token_ids.append(self.tokenizer.pad_token_id)
-        token_ids = torch.tensor(token_ids, device=self.device)[None,:]
-        attn_mask = torch.ones_like(token_ids)
-
-        output_ids = self.model.generate(token_ids, attention_mask=attn_mask, max_length=2048, begin_suppress_tokens=[self.tokenizer.eos_token_id])
-        output_ids = output_ids[0]
-        output_ids = output_ids[token_ids.shape[-1]:(-1 if output_ids[-1] == self.tokenizer.eos_token_id else None)]
+            token_ids.extend(self._encode_one(ex_prompt, ex_result))
+        token_ids.extend(self._encode_one(prompt))
+        output_ids = self._forward(
+            token_ids,
+        )
         return self.tokenizer.decode(output_ids)
+    def augment(self, api):
+        token_ids = []
+        for ex_prompt, ex_result in api.get_examples().items():
+            token_ids.extend(self._encode_one(ex_prompt, ex_result))
+        while True:
+            prompt_ids = self._forward(token_ids + self._encode_one())
+            result_ids = self._forward(token_ids + self._encode_one(prompt_ids))
+            token_ids.extend(self._encode_one(prompt_ids, result_ids))
+            if len(token_ids) >= self.model.config.seq_length:
+                break
+            yield self.tokenizer.decode(prompt_ids), self.tokenizer.decode(result_ids)

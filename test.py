@@ -12,7 +12,11 @@ if __name__ == '__main__':
 '''array.sort(3)''')
     for name, text in npapi.get_examples().items():
         print(f'{name}: {repr(text)}')
-    generator = af1.Generator()
+    print('Inferring:')
     prompt = 'Reverse an array C.'
     output = generator(npapi, prompt)
     print(f'{prompt}: {repr(output)}')
+    generator = af1.Generator()
+    print('Augmenting ...')
+    for prompt, result in generator.augment(npapi):
+        print(f'{prompt}: {repr(result)}')
