@@ -1,4 +1,4 @@
-import transformers, torch
+import transformers, torch, accelerate
 import os
 
 # let's make an interface to collect user examples for apis
@@ -39,11 +39,11 @@ class API:
 class Generator:
     def __init__(self, pipeline = None):
         if pipeline is None:
-            pipeline = transformers.pipeline('text-generation', 'bigscience/bloomz-560m')
-            if torch.cuda.is_available():
-                pipeline.model.to(torch.float16)
-                pipeline.model.to('cuda')
-                pipeline.device = pipeline.model.device
+            pipeline = transformers.pipeline(
+                    'text-generation',
+                    'bigscience/bloomz-560m',
+                    model_kwargs=dict(device_map='auto')
+                )
         self.model = pipeline.model
         self.tokenizer = pipeline.tokenizer
         # pad token disabled since it may be used in the prompt
