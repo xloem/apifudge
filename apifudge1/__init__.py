@@ -37,9 +37,7 @@ class API:
             raise
 
 class Generator:
-    # note: i had reasonable results using pad_token_id for sep,
-    # but it requires a little finesse when sampling multiple values, or generating middle terminators: it doesn't generate the pad token
-    def __init__(self, pipeline = None, sep_token = '\n', eos_token = None):
+    def __init__(self, pipeline = None, sep_token = None, eos_token = None):
         if pipeline is None:
             pipeline = transformers.pipeline(
                     'text-generation',
@@ -48,7 +46,7 @@ class Generator:
                 )
         self.model = pipeline.model
         self.tokenizer = pipeline.tokenizer
-        self.sep_token_ids = self.tokenizer.encode(sep_token)
+        self.sep_token_ids = self.tokenizer.encode(sep_token) if sep_token else [self.tokenizer.pad_token_id]
         self.eos_token_ids = self.tokenizer.encode(eos_token) if eos_token else [self.tokenizer.eos_token_id]
         # disallow zero-length generations
         self.model.config.begin_suppress_tokens = [self.sep_token_ids[0], self.eos_token_ids[0]]
@@ -61,16 +59,16 @@ class Generator:
         if ex_prompt is not None:
             if type(ex_prompt) is str:
                 ex_prompt = self.tokenizer.encode(ex_prompt)
-            if ex_prompt[-1] == self.tokenizer.eos_token_id:
-                ex_prompt = ex_prompt[:-1]
+            elif type(ex_prompt) is torch.Tensor:
+                ex_prompt = ex_prompt.tolist()
             assert ex_prompt[-1] not in self.model.config.begin_suppress_tokens
             token_ids.extend(ex_prompt)
             token_ids.extend(self.sep_token_ids)
             if ex_result is not None:
                 if type(ex_result) is str:
                     ex_result = self.tokenizer.encode(ex_result)
-                if ex_result[-1] == self.tokenizer.eos_token_id:
-                    ex_result = ex_result[:-1]
+                elif type(ex_result) is torch.Tensor:
+                    ex_result = ex_result.tolist()
                 assert ex_prompt[-1] not in self.model.config.begin_suppress_tokens
                 token_ids.extend(ex_result)
                 token_ids.extend(self.eos_token_ids)
@@ -85,21 +83,23 @@ class Generator:
                 [0] * (max_len - len(token_ids)) + [1] * len(token_ids)
                 for token_ids in tokens_ids
             ], device=self.device)
+        pad_token_id = self.tokenizer.eos_token_id
         tokens_ids = torch.tensor([
-                [self.tokenizer.pad_token_id] * (max_len - len(token_ids)) + token_ids
+                [pad_token_id] * (max_len - len(token_ids)) + token_ids
                 for token_ids in tokens_ids
             ], device=self.device)
         outputs_ids = self.model.generate(
                 tokens_ids,
                 attention_mask=attn_mask,
-                max_length=kwparams.pop('max_length', self.model.config.seq_length),
+                max_length=self.model.config.seq_length,
+                pad_token_id=pad_token_id,
                 **kwparams
             )
         outputs_ids = outputs_ids[...,tokens_ids.shape[-1]:]
         assert (outputs_ids >= 0).all()
         outputs_ids = [
-            (output_ids[:torch.where(output_ids == self.tokenizer.pad_token_id)[0][0]] 
-             if output_ids[-1] == self.tokenizer.pad_token_id else output_ids)
+            (output_ids[:torch.where(output_ids == pad_token_id)[0][0]] 
+             if output_ids[-1] == pad_token_id else output_ids)
             for output_ids in outputs_ids
         ]
         if len(outputs_ids) == 1:
