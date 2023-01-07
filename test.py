@@ -4,6 +4,12 @@ if __name__ == '__main__':
     npapi.set_example(
 '''Construct an array B that repeats array Y 4 times along the last dimension.''',
 '''B = np.tile(Y, 4)''')
+    npapi.set_example(
+'''Swap the last two axes of an array D.''',
+'''D = D.swapaxes(-2, -1)''')
+    npapi.set_example(
+'''Sort an array along the third axis.''',
+'''array.sort(3)''')
     for name, text in npapi.get_examples().items():
         print(f'{name}: {repr(text)}')
     generator = af1.Generator()
