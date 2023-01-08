@@ -37,17 +37,34 @@ class API:
             raise
 
 class Generator:
-    def __init__(self, pipeline = None, sep_token = None, eos_token = None):
-        if pipeline is None:
-            pipeline = transformers.pipeline(
-                    'text-generation',
-                    'bigscience/bloomz-560m',
-                    model_kwargs=dict(device_map='auto')
-                )
+    # - codeparrot/codeparrot-small is a text generation model for code that works with adapter-transformers
+    # - flan-t5-small is a seq2seq model that works with adapter-transformers; there could be a better one
+    # it is likely similar to do one or the other. the current code is a little more for text-generation.
+    def __init__(self, pipeline = 'bigscience/bloomz-560m', bos_token = None, sep_token = None, eos_token = None):
+        if type(pipeline) is str:
+            pipeline = transformers.pipeline('text-generation', pipeline, model_kwargs=dict(torch_dtype='auto', device_map='auto'))
         self.model = pipeline.model
         self.tokenizer = pipeline.tokenizer
-        self.sep_token_ids = self.tokenizer.encode(sep_token) if sep_token else [self.tokenizer.pad_token_id]
+        #self.model.add_adapter('test')
+        if bos_token:
+            self.bos_token_ids = self.tokenizer.encode(bos_token)
+        elif self.tokenizer.bos_token_id:
+            self.bos_token_ids = [self.tokenizer.bos_token_id]
+        else:
+            self.bos_token_ids = self.tokenizer.encode('Q:')
+        if sep_token:
+            self.sep_token_ids = self.tokenizer.encode(sep_token)
+        elif self.tokenizer.pad_token_id:
+            self.sep_token_ids = [self.tokenizer.pad_token_id]
+        else:
+            self.sep_token_ids = self.tokenizer.encode('\nA:')
         self.eos_token_ids = self.tokenizer.encode(eos_token) if eos_token else [self.tokenizer.eos_token_id]
+        assert None not in self.sep_token_ids
+        assert None not in self.eos_token_ids
+        if hasattr(self.model.config, 'seq_length'):
+            self.max_length = self.model.config.seq_length
+        else:
+            self.max_length = self.model.config.n_positions
         # disallow zero-length generations
         self.model.config.begin_suppress_tokens = [self.sep_token_ids[0], self.eos_token_ids[0]]
     @property
@@ -55,16 +72,21 @@ class Generator:
         return self.model.device
     def _encode_one(self, ex_prompt = None, ex_result = None):
         token_ids = []
-        token_ids.append(self.tokenizer.bos_token_id)
+        # prompt
+        if not self.model.config.is_encoder_decoder:
+            token_ids.extend(self.bos_token_ids)
         if ex_prompt is not None:
             if type(ex_prompt) is str:
                 ex_prompt = self.tokenizer.encode(ex_prompt)
             elif type(ex_prompt) is torch.Tensor:
                 ex_prompt = ex_prompt.tolist()
-            assert ex_prompt[-1] not in self.model.config.begin_suppress_tokens
             token_ids.extend(ex_prompt)
-            token_ids.extend(self.sep_token_ids)
+            if not self.model.config.is_encoder_decoder:
+                assert ex_prompt[-1] not in self.model.config.begin_suppress_tokens
+                token_ids.extend(self.sep_token_ids)
+            # result: same format, different trailing token
             if ex_result is not None:
+                assert not self.model.config.is_encoder_decoder
                 if type(ex_result) is str:
                     ex_result = self.tokenizer.encode(ex_result)
                 elif type(ex_result) is torch.Tensor:
@@ -91,7 +113,7 @@ class Generator:
         outputs_ids = self.model.generate(
                 tokens_ids,
                 attention_mask=attn_mask,
-                max_length=self.model.config.seq_length,
+                max_length=self.max_length,
                 pad_token_id=pad_token_id,
                 **kwparams
             )
@@ -107,14 +129,16 @@ class Generator:
         return outputs_ids
     def __call__(self, api, prompt):
         token_ids = []
-        for ex_prompt, ex_result in api.get_examples().items():
-            token_ids.extend(self._encode_one(ex_prompt, ex_result))
+        if not self.model.config.is_encoder_decoder:
+            for ex_prompt, ex_result in api.get_examples().items():
+                token_ids.extend(self._encode_one(ex_prompt, ex_result))
         token_ids.extend(self._encode_one(prompt))
         output_ids = self._forward(
             token_ids,
         )
         return self.tokenizer.decode(output_ids, skip_special_tokens = True)
     def augment(self, api, count=8):
+        assert not self.model.config.is_encoder_decoder
         examples_ids = []
         for ex_prompt, ex_result in api.get_examples().items():
             examples_ids.append(self._encode_one(ex_prompt, ex_result))
@@ -130,3 +154,4 @@ class Generator:
         prompts_ids = self._forward(token_ids + self._encode_one(), num_return_sequences=count, do_sample=True)
         results_ids = self._forward([token_ids + self._encode_one(prompt_ids) for prompt_ids in prompts_ids])
         return list(zip(self.tokenizer.batch_decode(prompts_ids, skip_special_tokens = True), self.tokenizer.batch_decode(results_ids, skip_special_tokens = True)))
+    #def train(self, api, 

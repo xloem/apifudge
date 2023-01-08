@@ -1,0 +1,3 @@
+adapter-transformers
+torch
+accelerate
